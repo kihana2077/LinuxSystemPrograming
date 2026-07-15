@@ -32,3 +32,14 @@ fgetc: fgetc.cpp
 	-$(CC) -o $@ $^
 	-./$@
 	-rm ./$@
+	
+
+fscanf: fscanf.cpp
+	-$(CC) -o $@ $^
+	-./$@
+	-rm ./$@
+
+stdin_out_err: stdin_out_err.cpp
+	-$(CC) -o $@ $^
+	-./$@
+	-rm ./$@
