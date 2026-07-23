@@ -23,17 +23,22 @@ int main(int argc, char const *argv[])
     }
     char buf[MAX_SIZE];
     size_t read_char;
-    while(read_char = (read(STDIN_FILENO,buf,strlen(buf))) > 0){
+    while((read_char = read(STDIN_FILENO,buf,MAX_SIZE-1)) > 0){
+        buf[read_char] = '\0';
         write(fd,buf,strlen(buf));
     }
 
     if(read_char < 0){
         perror("read");
         close(fd);
+        unlink(pipe_path);
         exit(EXIT_FAILURE);
     }
 
     printf("发送数据完成\n");
-
+    int release = unlink(pipe_path);
+    if(release == -1){
+        perror("UNLINK");
+    }
     return 0;
 }
