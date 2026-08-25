@@ -10,7 +10,7 @@
 #include<sys/epoll.h>
 #include<stdbool.h>
 #define MAX_CONNECTIONS 256
-
+#define MAX_EVENTS 256
 int set_nonblock(int fd){
     int flags = fcntl(fd,F_GETFL,0);
     if(flags == -1){
@@ -30,6 +30,7 @@ typedef struct Client{
     char send_buf[4096];
     size_t send_len;    //send_buf中目前有多少字节是等待发送数据
     size_t send_offset; //send_buf已经发送到哪个位置
+    bool should_close;
 }Client;
 
 
@@ -38,6 +39,7 @@ void _init_client(Client *c){
         c->used = 0;
         c->send_len = 0;
         c->send_offset = 0;
+        c->should_close = false;
         memset(c->recv_buf,0,sizeof(c->recv_buf));
         memset(c->recv_message,0,sizeof(c->recv_message));
         memset(c->send_buf,0,sizeof(c->send_buf));
@@ -119,6 +121,7 @@ int handle_send(int epfd,struct epoll_event *ev){
             epoll_ctl(epfd,EPOLL_CTL_MOD,c->client_fd,ev);
             c->send_len = 0;
             c->send_offset = 0;
+            return 1;
         }
         return 0;
     }else if(n == -1){
@@ -151,7 +154,10 @@ int main(int argc, char const *argv[])
         perror("socket");
         exit(EXIT_FAILURE);
     }
-    set_nonblock(server_fd);
+    if(set_nonblock(server_fd) == -1){
+        close(server_fd);
+        exit(EXIT_FAILURE);
+    }
     struct epoll_event ev;
     ev.events = EPOLLIN;
     ev.data.ptr = NULL;
@@ -180,9 +186,9 @@ int main(int argc, char const *argv[])
     }
     printf("Listening...\n");
 
-    struct epoll_event evs[MAX_CONNECTIONS + 1];
+    struct epoll_event evs[MAX_EVENTS + 1];
     while(1){
-    int n = epoll_wait(epfd,evs,MAX_CONNECTIONS + 1,-1);
+    int n = epoll_wait(epfd,evs,MAX_EVENTS + 1,-1);
         for(int i = 0;i < n;i++ ){
             uint32_t revents = evs[i].events;
             if(evs[i].data.ptr == NULL && (revents & EPOLLIN)){
@@ -191,43 +197,70 @@ int main(int argc, char const *argv[])
                     perror("accept");
                     continue;
                 }
-                set_nonblock(cli_fd);
+                if(set_nonblock(cli_fd) == -1){
+                    close(cli_fd);
+                    continue;
+                }
                 conns++;
                 if(conns > MAX_CONNECTIONS){
-                    //背压
+                    //背压，尚未实现
+                    close(cli_fd);
+                    conns--;
+                    continue;
                 }
                 struct epoll_event evc;
                 evc.events = EPOLLIN | EPOLLRDHUP;
                 Client *client = malloc(sizeof(*client));
+                if(client == NULL){
+                    conns--;
+                    perror("malloc");
+                    close(cli_fd);
+                    continue;
+                }
                 _init_client(client);
                 client->client_fd = cli_fd;
                 evc.data.ptr = client;
                 
-                epoll_ctl(epfd,EPOLL_CTL_ADD,cli_fd,&evc);
+                int ret = epoll_ctl(epfd,EPOLL_CTL_ADD,cli_fd,&evc);
+                if(ret == -1){
+                    conns--;
+                    close(cli_fd);
+                    free(client);
+                    continue;
+                }
                 printf("One client has connected\n");
                 continue;
             }
+            Client *c = evs[i].data.ptr;
             if(revents & EPOLLIN){
                 //recv
                 int ret = handle_recv(epfd,&evs[i]);
-                bool should_close = false;
-                if(revents & (EPOLLHUP | EPOLLERR)){
-                    should_close = true;
+
+                if(ret == -1){
+                    c->should_close = true;
                 }
                 if(revents & EPOLLRDHUP){
-                    if(!(revents & EPOLLOUT) && ret == -1){
-                        should_close = true;
-                    }
+                        c->should_close = true;
                 }
-                if(should_close){
-                    Client *c = evs[i].data.ptr;
+                
+            }
+            if(revents & EPOLLOUT){
+                //send
+                int ret = handle_send(epfd,&evs[i]);
+                if(ret == -1){
                     epoll_ctl(epfd,EPOLL_CTL_DEL,c->client_fd,NULL);
                     close(c->client_fd);
-                    free(evs[i].data.ptr);
+                    free(c);
+                    continue;
+                }else if(ret == 1){
+                if(c->should_close){
+                    conns--;
+                    epoll_ctl(epfd,EPOLL_CTL_DEL,c->client_fd,NULL);
+                    close(c->client_fd);
+                    free(c);
+                    continue;
                 }
-            }else if(revents & EPOLLOUT){
-                //send
-                handle_send(epfd,&evs[i]);
+                }
             }
         }
     }
